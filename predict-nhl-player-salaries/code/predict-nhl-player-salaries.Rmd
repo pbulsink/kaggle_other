@@ -1,0 +1,222 @@
+---
+title: "Predict NHL Player Salaries"
+author: "Phil Bulsink"
+date: "August 16, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Predicting NHL Player Salaries given the provided data.
+
+We'll start with reading the data:
+
+```{r load_data, message=FALSE, warning=FALSE}
+library(readr)
+train<-read_csv(file = "../input/train.csv")
+test_x<-read_csv(file = "../input/test.csv")
+test_y<-read_csv(file = "../input/test_salaries.csv")
+```
+
+Some birth places have no province/state assigned, we can put in 'other'.
+```{r prov_state}
+train$`Pr/St`[is.na(train$`Pr/St`)]<-'Other'
+test_x$`Pr/St`[is.na(test_x$`Pr/St`)]<-'Other'
+```
+
+We'll start by setting a few column types & cleaning units from % columns. 
+
+```{r columns, message=FALSE, warning=FALSE}
+library(lubridate)
+train$Born<-as.Date(train$Born, format = "%y-%m-%d")
+train$Hand <- as.factor(train$Hand)
+train$Position <- as.factor(train$Position)
+train$City <- as.factor(train$City)
+train$`Pr/St` <- as.factor(train$`Pr/St`)
+train$Cntry <- as.factor(train$Cntry)
+train$Nat <- as.factor(train$Nat)
+
+train$`SV%` <- as.numeric(train$`SV%`)
+train$PDO <- as.numeric(train$PDO)
+train$`F/60` <- as.numeric(train$`F/60`)
+train$`A/60` <- as.numeric(train$`A/60`)
+train$`Diff/60` <- as.numeric(train$`Diff/60`)
+train$Pass <- as.numeric(train$Pass)
+train$iHDf <- as.numeric(train$iHDf)
+train$Pace <- as.numeric(train$Pace)
+
+train$`TOI%` <- as.numeric(unlist(strsplit(train$`TOI%`, '%')))
+train$`IPP%` <- as.numeric(unlist(strsplit(train$`IPP%`, '%')))
+train$`SH%` <- as.numeric(unlist(strsplit(train$`SH%`, '%')))
+train$`Pct%` <- as.numeric(unlist(strsplit(train$`Pct%`, '%')))
+train$`BLK%` <- as.numeric(unlist(strsplit(train$`BLK%`, '%')))
+train$`FO%` <- as.numeric(unlist(strsplit(train$`FO%`, '%')))
+train$`%FOT` <- as.numeric(unlist(strsplit(train$`%FOT`, '%')))
+
+
+test_x$Born<-as.Date(test_x$Born, format = "%y-%m-%d")
+test_x$Hand <- as.factor(test_x$Hand)
+test_x$Position <- as.factor(test_x$Position)
+test_x$City <- as.factor(test_x$City)
+test_x$`Pr/St` <- as.factor(test_x$`Pr/St`)
+test_x$Cntry <- as.factor(test_x$Cntry)
+train$Nat <- as.factor(train$Nat)
+
+test_x$`SV%` <- as.numeric(test_x$`SV%`)
+test_x$PDO <- as.numeric(test_x$PDO)
+test_x$`F/60` <- as.numeric(test_x$`F/60`)
+test_x$`A/60` <- as.numeric(test_x$`A/60`)
+test_x$`Diff/60` <- as.numeric(test_x$`Diff/60`)
+test_x$Pass <- as.numeric(test_x$Pass)
+test_x$iHDf <- as.numeric(test_x$iHDf)
+test_x$Pace <- as.numeric(test_x$Pace)
+
+test_x$`TOI%` <- as.numeric(unlist(strsplit(test_x$`TOI%`, '%')))
+test_x$`IPP%` <- as.numeric(unlist(strsplit(test_x$`IPP%`, '%')))
+test_x$`SH%` <- as.numeric(unlist(strsplit(test_x$`SH%`, '%')))
+test_x$`Pct%` <- as.numeric(unlist(strsplit(test_x$`Pct%`, '%')))
+test_x$`BLK%` <- as.numeric(unlist(strsplit(test_x$`BLK%`, '%')))
+test_x$`FO%` <- as.numeric(unlist(strsplit(test_x$`FO%`, '%')))
+test_x$`%FOT` <- as.numeric(unlist(strsplit(test_x$`%FOT`, '%')))
+```
+
+In total we have `sum(is.na(train)) = ``r sum is.na(train)` NA values in our data. The NA values are in a few columns:
+```{r find_na}
+colSums(sapply(train, is.na))[colSums(sapply(train, is.na)) > 0]
+```
+
+
+Players who have NA in their draft columns (`DftYr`, `DftRd`, and `Ovrl`) are considered 'undrafted', according to [Wikipedia](https://en.wikipedia.org/wiki/List_of_undrafted_NHL_players_with_100_games_played): "they were draft eligible but were not selected during the course of the draft and later signed with NHL teams as an undrafted free agent". They can be logically assigned to have a draft round of `r max(train$DftRd[!is.na(train$DftRd)])+1`, which is one more than the max of the data, and a draft overall of `r max(train$Ovrl[!is.na(train$Ovrl)])+1`, which is one more than the max in the data. For draft year, we'll put in the year the player turned 21, as this is their first opportunity to be drafted. 
+
+```{r fix_draft}
+max_DftRd<-max(train$DftRd[!is.na(train$DftRd)])
+train$DftRd[is.na(train$DftRd)]<-max_DftRd + 1
+test_x$DftRd[is.na(test_x$DftRd)]<-max_DftRd + 1
+
+max_Ovrl<-max(train$Ovrl[!is.na(train$Ovrl)])
+train$Ovrl[is.na(train$Ovrl)]<-max_Ovrl + 1
+test_x$Ovrl[is.na(test_x$Ovrl)]<-max_Ovrl + 1
+
+train$DftYr[is.na(train$DftYr)]<-year(train$Born[is.na(train$DftYr)]) + 21
+test_x$DftYr[is.na(test_x$DftYr)]<-year(test_x$Born[is.na(test_x$DftYr)]) + 21
+```
+
+Many of our remaining NAs (58 total) come from one row. We can fix it with 0s.
+```{r fix_dan_renouf}
+train[291, which(is.na(train[291,]))]<-0
+```
+
+Of the remainder, most are calculated values that can be assigned 0's. The exception is PDO (which is a team metric, so we can pull the average from the teammates), sDist_1 (which corellates to sDist), and iHDf (which is calculated from iHf and iHA, and is NA when either of the other two are). 
+
+```{r last_nas}
+train$`IPP%`[is.na(train$`IPP%`)]<-0
+train$`SH%`[is.na(train$`SH%`)]<-0
+train$iCF[is.na(train$iCF)]<-0
+test_x$iCF[is.na(test_x$iCF)]<-0
+train$iFF[is.na(train$iFF)]<-0
+test_x$iFF[is.na(test_x$iFF)]<-0
+train$iSF[is.na(train$iSF)]<-0
+test_x$iSF[is.na(test_x$iSF)]<-0
+train$iRB[is.na(train$iRB)]<-0
+test_x$iRB[is.na(test_x$iRB)]<-0
+train$Pass[is.na(train$Pass)]<-0
+train$`GS/G`[is.na(train$`GS/G`)]<-0
+
+train$PDO[is.na(train$PDO)]<-as.integer(mean(unlist(train[train$Team == train$Team[is.na(train$PDO)], "PDO"]), na.rm = TRUE))
+train$sDist_1[is.na(train$sDist_1)] <- train$sDist[is.na(train$sDist_1)]
+test_x$sDist_1[is.na(test_x$sDist_1)] <- test_x$sDist[is.na(test_x$sDist_1)]
+
+hit_na_indexes_tr<-which(is.na(train$iHDf))
+train$iHA[hit_na_indexes_tr]<-0
+train$iHDf[hit_na_indexes_tr]<-train$iHF[hit_na_indexes_tr]-train$iHA[hit_na_indexes_tr]
+
+hit_na_indexes_ts<-which(is.na(test_x$iHDf))
+test_x$iHA[hit_na_indexes_ts]<-0
+test_x$iHDf[hit_na_indexes_ts]<-test_x$iHF[hit_na_indexes_ts]-test_x$iHA[hit_na_indexes_ts]
+```
+
+With all of our data complete, we can come up with a few new colums to help models. We'll add age (as years old as of 2017-09-01, when training camps start), as well as some one-hot columns for positions (Defence, Forward). Note there are no goalies in this set. 
+
+```{r new_columns}
+#Age in days
+train$Age<-as.Date('2017-09-01')-train$Born
+test_x$Age<-as.Date('2017-09-01')-test_x$Born
+
+train$Forward<-0
+train$Defence<-0
+test_x$Forward<-0
+test_x$Defence<-0
+
+train$Forward[train$Position %in% c('C','C/D','C/LW','C/LW/RW','C/RW','C/RW/LW','D/LW','LW','LW/C','LW/C/RW','LW/RW','LW/RW/C','RW','RW/C','RW/C/LW','RW/LW','RW/LW/C')] <- 1
+test_x$Forward[test_x$Position %in% c('C','C/D','C/LW','C/LW/RW','C/RW','C/RW/LW','D/LW','LW','LW/C','LW/C/RW','LW/RW','LW/RW/C','RW','RW/C','RW/C/LW','RW/LW','RW/LW/C')] <- 1
+
+train$Defence[train$Position %in% c('D','D/RW','D/LW','C/D')]<-1
+test_x$Defence[test_x$Position %in% c('D','D/RW','D/LW','C/D')]<-1
+```
+
+Let's look and see if there's any Corellations worth noting:
+```{r corr}
+library(corrplot)
+train_numeric<-subset(train, select = sapply(train,is.numeric))
+correlations <- cor(train_numeric)
+corr.Salary<- as.matrix(sort(correlations[,'Salary'], decreasing = TRUE))
+corr.idx<- names(which(apply(corr.Salary, 1, function(x) (x > 0.6 | x < -0.6))))
+corrplot(as.matrix(correlations[corr.idx, corr.idx]), type='upper',method='color', addCoef.col = 'black', tl.cex = .7, cl.cex = .7, number.cex = .7)
+```
+
+There are tons of corellations here, but we'll try to let the algorithms dig through them. 
+We'll try an XGBoost algorithm.
+
+```{r model}
+library(caret)
+library(xgboost)
+#inTrain<-createDataPartition(y=train_numeric$Salary, p=0.75, list=FALSE)
+inTrain<-1:nrow(train_numeric)
+
+tr_x<-train_numeric[inTrain, 2:ncol(train_numeric)]
+tr_y<-unlist(train_numeric[inTrain, 1])
+#val_x<-train_numeric[-inTrain, 2:ncol(train_numeric)]
+#val_y<-train_numeric[-inTrain, 1]
+
+dtrain<-xgb.DMatrix(as.matrix(tr_x), label=tr_y)
+#dtest<-xgb.DMatrix(as.matrix(val_x))
+
+cv.ctrl<-trainControl(method='repeatedcv', repeats = 1, number = 4, allowParallel = TRUE)
+
+xgb.grid <- expand.grid(nrounds = c(10000, 7500), 
+                        eta = c(0.01, 0.005, 0.001),
+                        max_depth = c(4,6,8),
+                        colsample_bytree=c(0.1, 0.5, 0.9),
+                        min_child_weight = c(2,3),
+                        subsample = c(0,0.2,0.4,0.6),
+                        gamma=0.01)
+
+xgb_tune <- train(as.matrix(tr_x),
+       tr_y,
+       method="xgbTree",
+       trControl=cv.ctrl,
+       tuneGrid=xgb.grid,
+       verbose=TRUE,
+       metric="RMSE",
+       nthread =3)
+
+xgb.params <- list(
+  booster = 'gbtree',
+  objective = 'reg:linear',
+  colsample_bytree=1,
+  eta=0.005,
+  max_depth = 4,
+  min_child_weight = 3,
+  alpha = 0.3,
+  lambda=0.4,
+  gamma=0.01,
+  subsample=0.6,
+  seed=5,
+  silent=TRUE)
+xgb.cv(xgb.params, dtrain, nrounds = 5000, nfold = 4, early_stopping_rounds = 500)
+bst <- xgb.train(xgb.params, data = dtrain, nrounds = 10000, early_stopping_rounds = 300, watchlist = list(train = dtrain))
+
+```
+
